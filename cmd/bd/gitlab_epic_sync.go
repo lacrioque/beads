@@ -62,8 +62,10 @@ func pullEpics(ctx context.Context, client *gitlab.Client, st storage.Storage, a
 	}
 
 	created, updated := 0, 0
+	total := len(epics)
 
-	for _, epic := range epics {
+	for i, epic := range epics {
+		_, _ = fmt.Fprintf(out, "\r  Pulling epics %d/%d...", i+1, total)
 		ref := epicExternalRef(epic)
 
 		if opts.DryRun {
@@ -108,7 +110,8 @@ func pullEpics(ctx context.Context, client *gitlab.Client, st storage.Storage, a
 		}
 	}
 
-	if !opts.DryRun && (created > 0 || updated > 0) {
+	_, _ = fmt.Fprint(out, "\n")
+	if !opts.DryRun {
 		_, _ = fmt.Fprintf(out, "  ✓ Epics: %d created, %d updated\n", created, updated)
 	}
 	return nil
@@ -123,13 +126,25 @@ func pushEpics(ctx context.Context, client *gitlab.Client, st storage.Storage, a
 		return fmt.Errorf("searching epics: %w", err)
 	}
 
-	created, updated, skipped := 0, 0, 0
-
+	// Count epic-type issues first for diagnostics.
+	var epics []*types.Issue
 	for _, issue := range issues {
-		if issue.IssueType != types.TypeEpic {
-			continue
+		if issue.IssueType == types.TypeEpic {
+			epics = append(epics, issue)
 		}
+	}
 
+	if len(epics) == 0 {
+		_, _ = fmt.Fprintf(out, "  No epic-type issues found to push\n")
+		return nil
+	}
+	_, _ = fmt.Fprintf(out, "  Found %d epic-type issues\n", len(epics))
+
+	created, updated, skipped := 0, 0, 0
+	total := len(epics)
+
+	for i, issue := range epics {
+		_, _ = fmt.Fprintf(out, "\r  Pushing epics %d/%d...", i+1, total)
 		extRef := derefStrLocal(issue.ExternalRef)
 
 		// Skip epics backed by milestones
@@ -194,7 +209,8 @@ func pushEpics(ctx context.Context, client *gitlab.Client, st storage.Storage, a
 		}
 	}
 
-	if !opts.DryRun && (created > 0 || updated > 0) {
+	_, _ = fmt.Fprint(out, "\n")
+	if !opts.DryRun {
 		_, _ = fmt.Fprintf(out, "  ✓ Epics pushed: %d created, %d updated, %d skipped\n", created, updated, skipped)
 	}
 	return nil

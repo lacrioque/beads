@@ -373,9 +373,22 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	engine := tracker.NewEngine(gt, store, actor)
 	engine.OnMessage = func(msg string) { _, _ = fmt.Fprintln(out, "  "+msg) }
 	engine.OnWarning = func(msg string) { _, _ = fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
+	engine.OnProgress = func(phase string, current, total int) {
+		_, _ = fmt.Fprintf(out, "\r  %s %d/%d...", phase, current, total)
+		if current == total {
+			_, _ = fmt.Fprint(out, "\n")
+		}
+	}
+
+	// Create GitLab client for dedup hooks
+	glClient := getGitLabClient(config)
 
 	// Set up GitLab-specific pull hooks
-	engine.PullHooks = buildGitLabPullHooks(ctx)
+	excludeEpicIssues := gitlabSyncMilestones || gitlabSyncEpics
+	engine.PullHooks = buildGitLabPullHooks(ctx, glClient, excludeEpicIssues)
+
+	// Set up GitLab-specific push hooks for dedup
+	engine.PushHooks = buildGitLabPushHooks(glClient)
 
 	// Build sync options from CLI flags
 	pull := !gitlabSyncPushOnly
@@ -385,6 +398,12 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		Pull:   pull,
 		Push:   push,
 		DryRun: gitlabSyncDryRun,
+	}
+
+	// When milestones or epics mode is enabled, exclude epic-type issues
+	// from the main issue sync — they're handled by the dedicated sync.
+	if gitlabSyncMilestones || gitlabSyncEpics {
+		opts.ExcludeTypes = append(opts.ExcludeTypes, types.TypeEpic)
 	}
 
 	// Map conflict resolution
@@ -466,7 +485,9 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 }
 
 // buildGitLabPullHooks creates PullHooks for GitLab-specific pull behavior.
-func buildGitLabPullHooks(ctx context.Context) *tracker.PullHooks {
+// When excludeEpics is true, issues with type::epic label are skipped during
+// pull — they'll be handled by the dedicated milestone/epic sync instead.
+func buildGitLabPullHooks(ctx context.Context, _ *gitlab.Client, excludeEpics bool) *tracker.PullHooks {
 	prefix := "bd"
 	if store != nil {
 		if p, err := store.GetConfig(ctx, "issue_prefix"); err == nil && p != "" {
@@ -474,12 +495,64 @@ func buildGitLabPullHooks(ctx context.Context) *tracker.PullHooks {
 		}
 	}
 
-	return &tracker.PullHooks{
+	hooks := &tracker.PullHooks{
 		GenerateID: func(_ context.Context, issue *types.Issue) error {
 			if issue.ID == "" {
 				issue.ID = generateIssueID(prefix)
 			}
 			return nil
+		},
+		// ResolveExisting matches pulled GitLab issues to existing beads issues
+		// using the beads-id label, preventing duplicate imports.
+		ResolveExisting: func(ctx context.Context, extIssue *tracker.TrackerIssue) (*types.Issue, error) {
+			beadsID := gitlab.ExtractBeadsID(extIssue.Labels)
+			if beadsID == "" {
+				return nil, nil
+			}
+			issue, err := store.GetIssue(ctx, beadsID)
+			if err != nil {
+				return nil, nil // Not found, that's fine
+			}
+			return issue, nil
+		},
+	}
+
+	if excludeEpics {
+		hooks.ShouldImport = func(issue *tracker.TrackerIssue) bool {
+			// Skip issues with type::epic label — handled by milestone/epic sync
+			for _, label := range issue.Labels {
+				if label == "type::epic" {
+					return false
+				}
+			}
+			return true
+		}
+	}
+
+	return hooks
+}
+
+// buildGitLabPushHooks creates PushHooks for GitLab-specific push behavior.
+func buildGitLabPushHooks(client *gitlab.Client) *tracker.PushHooks {
+	return &tracker.PushHooks{
+		// FindExisting searches GitLab for an existing issue with a matching
+		// beads-id label, preventing duplicate creation across syncs.
+		FindExisting: func(ctx context.Context, issue *types.Issue) (*tracker.TrackerIssue, error) {
+			if issue.ID == "" {
+				return nil, nil
+			}
+			label := "beads-id::" + issue.ID
+			existing, err := client.SearchIssueByLabel(ctx, label)
+			if err != nil || existing == nil {
+				return nil, nil
+			}
+			ti := tracker.TrackerIssue{
+				ID:         strconv.Itoa(existing.ID),
+				Identifier: strconv.Itoa(existing.IID),
+				URL:        existing.WebURL,
+				Title:      existing.Title,
+			}
+			return &ti, nil
 		},
 	}
 }

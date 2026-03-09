@@ -35,6 +35,12 @@ type PullHooks struct {
 	// Called on the raw TrackerIssue before conversion to beads format.
 	// If nil, all issues are imported.
 	ShouldImport func(issue *TrackerIssue) bool
+
+	// ResolveExisting finds an existing beads issue from a tracker issue
+	// using tracker-specific dedup (e.g., beads-id labels).
+	// Called when GetIssueByExternalRef returns nil (no match by ref).
+	// Return (issue, nil) if found, (nil, nil) if not found.
+	ResolveExisting func(ctx context.Context, extIssue *TrackerIssue) (*types.Issue, error)
 }
 
 // PushHooks contains optional callbacks that customize push (export) behavior.
@@ -53,6 +59,12 @@ type PushHooks struct {
 	// Called in addition to type/state/ephemeral filters. Use for prefix filtering, etc.
 	// If nil, all issues (matching other filters) are pushed.
 	ShouldPush func(issue *types.Issue) bool
+
+	// FindExisting searches the external tracker for an issue matching the given
+	// beads issue (e.g., via a beads-id label). Called before creating a new
+	// external issue to prevent duplicates. Return (trackerIssue, nil) if found,
+	// (nil, nil) if not found.
+	FindExisting func(ctx context.Context, issue *types.Issue) (*TrackerIssue, error)
 
 	// BuildStateCache is called once before the push loop to pre-cache workflow states.
 	// Returns an opaque cache value passed to ResolveState on each issue.
@@ -75,8 +87,9 @@ type Engine struct {
 	PushHooks *PushHooks
 
 	// Callbacks for UI feedback (optional).
-	OnMessage func(msg string)
-	OnWarning func(msg string)
+	OnMessage  func(msg string)
+	OnWarning  func(msg string)
+	OnProgress func(phase string, current, total int)
 
 	// stateCache holds the opaque value from PushHooks.BuildStateCache during a push.
 	// Tracker adapters access it via ResolveState().
@@ -286,8 +299,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 
 	mapper := e.Tracker.FieldMapper()
 	var pendingDeps []DependencyInfo
+	total := len(extIssues)
 
-	for _, extIssue := range extIssues {
+	for i, extIssue := range extIssues {
+		e.progress("Pulling", i+1, total)
+
 		// ShouldImport hook: filter before conversion
 		if e.PullHooks != nil && e.PullHooks.ShouldImport != nil {
 			if !e.PullHooks.ShouldImport(&extIssue) {
@@ -305,6 +321,16 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 		// Check if we already have this issue
 		ref := e.Tracker.BuildExternalRef(&extIssue)
 		existing, _ := e.Store.GetIssueByExternalRef(ctx, ref)
+
+		// Dedup: if not matched by ExternalRef, try tracker-specific dedup (e.g., beads-id label)
+		if existing == nil && e.PullHooks != nil && e.PullHooks.ResolveExisting != nil {
+			resolved, _ := e.PullHooks.ResolveExisting(ctx, &extIssue)
+			if resolved != nil {
+				existing = resolved
+				// Store the external ref so future syncs match directly
+				_ = e.Store.UpdateIssue(ctx, existing.ID, map[string]interface{}{"external_ref": ref}, e.Actor)
+			}
+		}
 
 		conv := mapper.IssueToBeads(&extIssue)
 		if conv == nil || conv.Issue == nil {
@@ -415,6 +441,9 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		return nil, fmt.Errorf("searching local issues: %w", err)
 	}
 
+	total := len(issues)
+	pushIdx := 0
+
 	for _, issue := range issues {
 		// Skip filtered types/states/ephemeral
 		if !e.shouldPushIssue(issue, opts) {
@@ -435,6 +464,9 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			stats.Skipped++
 			continue
 		}
+
+		pushIdx++
+		e.progress("Pushing", pushIdx, total)
 
 		extRef := derefStr(issue.ExternalRef)
 
@@ -458,6 +490,21 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		}
 
 		if extRef == "" || !e.Tracker.IsExternalRef(extRef) {
+			// Dedup: before creating, check if the issue already exists on the
+			// external tracker (e.g., via beads-id label) to prevent duplicates.
+			if e.PushHooks != nil && e.PushHooks.FindExisting != nil {
+				found, _ := e.PushHooks.FindExisting(ctx, issue)
+				if found != nil {
+					ref := e.Tracker.BuildExternalRef(found)
+					updates := map[string]interface{}{"external_ref": ref}
+					if err := e.Store.UpdateIssue(ctx, issue.ID, updates, e.Actor); err != nil {
+						e.warn("Failed to update external_ref for %s: %v", issue.ID, err)
+					}
+					stats.Updated++
+					continue
+				}
+			}
+
 			// Create in external tracker
 			created, err := e.Tracker.CreateIssue(ctx, pushIssue)
 			if err != nil {
@@ -662,5 +709,11 @@ func (e *Engine) msg(format string, args ...interface{}) {
 func (e *Engine) warn(format string, args ...interface{}) {
 	if e.OnWarning != nil {
 		e.OnWarning(fmt.Sprintf(format, args...))
+	}
+}
+
+func (e *Engine) progress(phase string, current, total int) {
+	if e.OnProgress != nil {
+		e.OnProgress(phase, current, total)
 	}
 }

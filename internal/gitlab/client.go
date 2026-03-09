@@ -302,6 +302,29 @@ func (c *Client) GetIssueLinks(ctx context.Context, iid int) ([]IssueLink, error
 	return links, nil
 }
 
+// SearchIssueByLabel finds a single issue with the given label.
+// Returns nil, nil if no issue matches.
+func (c *Client) SearchIssueByLabel(ctx context.Context, label string) (*Issue, error) {
+	params := map[string]string{
+		"labels":   label,
+		"per_page": "1",
+	}
+	urlStr := c.buildURL("/projects/"+c.projectPath()+"/issues", params)
+	respBody, _, err := c.doRequest(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search issues by label: %w", err)
+	}
+
+	var issues []Issue
+	if err := json.Unmarshal(respBody, &issues); err != nil {
+		return nil, fmt.Errorf("failed to parse label search response: %w", err)
+	}
+	if len(issues) == 0 {
+		return nil, nil
+	}
+	return &issues[0], nil
+}
+
 // FetchIssueByIID retrieves a single issue by its project-scoped IID.
 func (c *Client) FetchIssueByIID(ctx context.Context, iid int) (*Issue, error) {
 	urlStr := c.buildURL("/projects/"+c.projectPath()+"/issues/"+strconv.Itoa(iid), nil)

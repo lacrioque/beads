@@ -331,6 +331,7 @@ func TestBeadsIssueToGitLabFields(t *testing.T) {
 
 	estimatedMinutes := 300 // 5 hours
 	beadsIssue := &types.Issue{
+		ID:               "bd-test-123",
 		Title:            "New feature request",
 		Description:      "Add dark mode support",
 		IssueType:        types.TypeFeature,
@@ -356,10 +357,14 @@ func TestBeadsIssueToGitLabFields(t *testing.T) {
 		t.Fatalf("fields[\"labels\"] is not []string")
 	}
 
+	hasBeadsID := false
 	hasType := false
 	hasPriority := false
 	hasStatus := false
 	for _, l := range labels {
+		if l == "beads-id::bd-test-123" {
+			hasBeadsID = true
+		}
 		if l == "type::feature" {
 			hasType = true
 		}
@@ -369,6 +374,9 @@ func TestBeadsIssueToGitLabFields(t *testing.T) {
 		if l == "status::in_progress" {
 			hasStatus = true
 		}
+	}
+	if !hasBeadsID {
+		t.Errorf("labels missing beads-id::bd-test-123, got %v", labels)
 	}
 	if !hasType {
 		t.Errorf("labels missing type::feature, got %v", labels)
@@ -455,6 +463,7 @@ func TestFilterNonScopedLabels(t *testing.T) {
 		"type::bug",
 		"priority::high",
 		"status::in_progress",
+		"beads-id::bd-test-123",
 		"backend",
 		"needs-review",
 		"urgent",
@@ -471,6 +480,27 @@ func TestFilterNonScopedLabels(t *testing.T) {
 	for i, l := range filtered {
 		if l != expected[i] {
 			t.Errorf("filtered[%d] = %q, want %q", i, l, expected[i])
+		}
+	}
+}
+
+// TestExtractBeadsID verifies extraction of beads issue ID from GitLab labels.
+func TestExtractBeadsID(t *testing.T) {
+	tests := []struct {
+		labels []string
+		want   string
+	}{
+		{[]string{"beads-id::bd-test-123", "type::bug"}, "bd-test-123"},
+		{[]string{"type::bug", "priority::high"}, ""},
+		{[]string{}, ""},
+		{nil, ""},
+		{[]string{"beads-id::hq-42-abc"}, "hq-42-abc"},
+	}
+
+	for _, tt := range tests {
+		got := ExtractBeadsID(tt.labels)
+		if got != tt.want {
+			t.Errorf("ExtractBeadsID(%v) = %q, want %q", tt.labels, got, tt.want)
 		}
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -56,8 +57,10 @@ func pullMilestones(ctx context.Context, client *gitlab.Client, st storage.Stora
 	}
 
 	created, updated, skipped := 0, 0, 0
+	total := len(milestones)
 
-	for _, ms := range milestones {
+	for i, ms := range milestones {
+		_, _ = fmt.Fprintf(out, "\r  Pulling milestones %d/%d...", i+1, total)
 		ref := milestoneExternalRef(ms)
 
 		if dryRun {
@@ -104,10 +107,9 @@ func pullMilestones(ctx context.Context, client *gitlab.Client, st storage.Stora
 		}
 	}
 
+	_, _ = fmt.Fprint(out, "\n")
 	if !dryRun {
-		if created > 0 || updated > 0 {
-			_, _ = fmt.Fprintf(out, "  ✓ Milestones: %d created, %d updated, %d skipped\n", created, updated, skipped)
-		}
+		_, _ = fmt.Fprintf(out, "  ✓ Milestones: %d created, %d updated, %d skipped\n", created, updated, skipped)
 	}
 	return nil
 }
@@ -122,37 +124,57 @@ func pushMilestones(ctx context.Context, client *gitlab.Client, st storage.Stora
 		return fmt.Errorf("searching epics: %w", err)
 	}
 
-	created, updated, skipped := 0, 0, 0
-
+	// Count epic-type issues first for diagnostics.
+	var epics []*types.Issue
 	for _, issue := range issues {
-		if issue.IssueType != types.TypeEpic {
-			continue
+		if issue.IssueType == types.TypeEpic {
+			epics = append(epics, issue)
 		}
+	}
+
+	if len(epics) == 0 {
+		_, _ = fmt.Fprintf(out, "  No epic-type issues found to push as milestones\n")
+		return nil
+	}
+	_, _ = fmt.Fprintf(out, "  Found %d epic-type issues\n", len(epics))
+
+	created, updated, skipped := 0, 0, 0
+	total := len(epics)
+
+	for i, issue := range epics {
+		_, _ = fmt.Fprintf(out, "\r  Pushing milestones %d/%d...", i+1, total)
 
 		extRef := derefStrLocal(issue.ExternalRef)
 
 		// Skip epics backed by GitLab epics (not milestones)
-		if strings.Contains(extRef, "/-/epics/") {
+		if isEpicRef(extRef) {
 			skipped++
 			continue
 		}
 
+		// Determine milestone ref: check ExternalRef first, then metadata
+		// (metadata stores the milestone ref for epics with non-GitLab ExternalRef)
+		msRef := ""
+		if isMilestoneRef(extRef) {
+			msRef = extRef
+		} else if ref := extractMetadataMilestoneRef(issue); ref != "" {
+			msRef = ref
+		}
+
 		if dryRun {
-			if isMilestoneRef(extRef) {
-				_, _ = fmt.Fprintf(out, "  [dry-run] Would update milestone: %s\n", issue.Title)
+			if msRef != "" {
+				_, _ = fmt.Fprintf(out, "\n  [dry-run] Would update milestone: %s\n", issue.Title)
 				updated++
-			} else if extRef == "" {
-				_, _ = fmt.Fprintf(out, "  [dry-run] Would create milestone: %s\n", issue.Title)
-				created++
 			} else {
-				skipped++
+				_, _ = fmt.Fprintf(out, "\n  [dry-run] Would create milestone: %s\n", issue.Title)
+				created++
 			}
 			continue
 		}
 
-		if isMilestoneRef(extRef) {
+		if msRef != "" {
 			// Update existing milestone
-			msID := extractMilestoneID(extRef)
+			msID := extractMilestoneID(msRef)
 			if msID == 0 {
 				skipped++
 				continue
@@ -160,41 +182,55 @@ func pushMilestones(ctx context.Context, client *gitlab.Client, st storage.Stora
 
 			updates := epicToMilestoneFields(issue)
 			if _, err := client.UpdateMilestone(ctx, msID, updates); err != nil {
-				_, _ = fmt.Fprintf(out, "  Warning: failed to update milestone for %s: %v\n", issue.ID, err)
+				_, _ = fmt.Fprintf(out, "\n  Warning: failed to update milestone for %s: %v\n", issue.ID, err)
 				continue
 			}
 			updated++
 
 			// Link child issues to milestone
 			if err := pushMilestoneChildren(ctx, client, st, issue.ID, msID); err != nil {
-				_, _ = fmt.Fprintf(out, "  Warning: failed to link children for %s: %v\n", issue.ID, err)
+				_, _ = fmt.Fprintf(out, "\n  Warning: failed to link children for %s: %v\n", issue.ID, err)
 			}
-		} else if extRef == "" {
-			// Create new milestone
+		} else {
+			// Create new milestone — if it already exists (title conflict),
+			// find the existing one by title and adopt it instead.
 			ms, err := client.CreateMilestone(ctx, issue.Title, issue.Description, "", "")
 			if err != nil {
-				_, _ = fmt.Fprintf(out, "  Warning: failed to create milestone for %s: %v\n", issue.ID, err)
-				continue
+				// Title already taken — search for the existing milestone
+				existing, searchErr := client.SearchMilestoneByTitle(ctx, issue.Title)
+				if searchErr != nil || existing == nil {
+					_, _ = fmt.Fprintf(out, "\n  Warning: failed to create milestone for %s: %v\n", issue.ID, err)
+					continue
+				}
+				ms = existing
 			}
 
-			// Store external ref
 			ref := milestoneExternalRef(*ms)
-			updateMap := map[string]any{"external_ref": ref}
-			if err := st.UpdateIssue(ctx, issue.ID, updateMap, act); err != nil {
-				_, _ = fmt.Fprintf(out, "  Warning: failed to update external_ref for %s: %v\n", issue.ID, err)
+			if extRef == "" {
+				// No existing ref — use milestone URL as the ExternalRef
+				updateMap := map[string]any{"external_ref": ref}
+				if err := st.UpdateIssue(ctx, issue.ID, updateMap, act); err != nil {
+					_, _ = fmt.Fprintf(out, "\n  Warning: failed to update external_ref for %s: %v\n", issue.ID, err)
+				}
+			} else {
+				// Has a non-GitLab ref (e.g., GitHub) — store milestone mapping in metadata
+				md := makeMilestoneMetadata(issue, ref)
+				updateMap := map[string]any{"metadata": md}
+				if err := st.UpdateIssue(ctx, issue.ID, updateMap, act); err != nil {
+					_, _ = fmt.Fprintf(out, "\n  Warning: failed to store milestone ref for %s: %v\n", issue.ID, err)
+				}
 			}
 			created++
 
 			// Link child issues to milestone
 			if err := pushMilestoneChildren(ctx, client, st, issue.ID, ms.ID); err != nil {
-				_, _ = fmt.Fprintf(out, "  Warning: failed to link children for %s: %v\n", issue.ID, err)
+				_, _ = fmt.Fprintf(out, "\n  Warning: failed to link children for %s: %v\n", issue.ID, err)
 			}
-		} else {
-			skipped++
 		}
 	}
 
-	if !dryRun && (created > 0 || updated > 0) {
+	_, _ = fmt.Fprint(out, "\n")
+	if !dryRun {
 		_, _ = fmt.Fprintf(out, "  ✓ Milestones pushed: %d created, %d updated, %d skipped\n", created, updated, skipped)
 	}
 	return nil
@@ -393,3 +429,30 @@ func derefStrLocal(s *string) string {
 
 // strPtrLocal returns a pointer to the given string.
 func strPtrLocal(s string) *string { return &s }
+
+// extractMetadataMilestoneRef extracts a milestone ref stored in issue metadata.
+func extractMetadataMilestoneRef(issue *types.Issue) string {
+	if len(issue.Metadata) == 0 {
+		return ""
+	}
+	var md map[string]interface{}
+	if err := json.Unmarshal(issue.Metadata, &md); err != nil {
+		return ""
+	}
+	ref, _ := md["gitlab_milestone_ref"].(string)
+	if isMilestoneRef(ref) {
+		return ref
+	}
+	return ""
+}
+
+// makeMilestoneMetadata merges a milestone ref into the issue's existing metadata.
+func makeMilestoneMetadata(issue *types.Issue, ref string) json.RawMessage {
+	md := make(map[string]interface{})
+	if len(issue.Metadata) > 0 {
+		_ = json.Unmarshal(issue.Metadata, &md)
+	}
+	md["gitlab_milestone_ref"] = ref
+	raw, _ := json.Marshal(md)
+	return json.RawMessage(raw)
+}

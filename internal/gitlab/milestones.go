@@ -70,6 +70,28 @@ func (c *Client) GetMilestone(ctx context.Context, milestoneID int) (*Milestone,
 	return &ms, nil
 }
 
+// SearchMilestoneByTitle finds a milestone by its exact title.
+// Returns nil, nil if no milestone matches.
+func (c *Client) SearchMilestoneByTitle(ctx context.Context, title string) (*Milestone, error) {
+	params := map[string]string{
+		"title": title,
+	}
+	urlStr := c.buildURL("/projects/"+c.projectPath()+"/milestones", params)
+	respBody, _, err := c.doRequest(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search milestones: %w", err)
+	}
+
+	var milestones []Milestone
+	if err := json.Unmarshal(respBody, &milestones); err != nil {
+		return nil, fmt.Errorf("failed to parse milestone search response: %w", err)
+	}
+	if len(milestones) == 0 {
+		return nil, nil
+	}
+	return &milestones[0], nil
+}
+
 // CreateMilestone creates a new milestone in the GitLab project.
 func (c *Client) CreateMilestone(ctx context.Context, title, description, dueDate, startDate string) (*Milestone, error) {
 	body := map[string]any{

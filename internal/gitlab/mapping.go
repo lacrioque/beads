@@ -167,6 +167,11 @@ func BeadsIssueToGitLabFields(issue *types.Issue, config *MappingConfig) map[str
 	// Build labels from type, priority, and status
 	var labels []string
 
+	// Add beads-id label for deduplication across syncs
+	if issue.ID != "" {
+		labels = append(labels, "beads-id::"+issue.ID)
+	}
+
 	// Add type label
 	if issue.IssueType != "" {
 		labels = append(labels, "type::"+string(issue.IssueType))
@@ -262,16 +267,29 @@ func issueLinksToDependencies(sourceIID int, links []IssueLink, config *MappingC
 }
 
 // filterNonScopedLabels returns only labels without scoped prefixes.
-// Removes priority::*, status::*, and type::* labels.
+// Removes priority::*, status::*, type::*, and beads-id::* labels.
 func filterNonScopedLabels(labels []string) []string {
 	var filtered []string
 	for _, label := range labels {
 		prefix, _ := parseLabelPrefix(label)
 		// Skip scoped labels that we handle specially
-		if prefix == "priority" || prefix == "status" || prefix == "type" {
+		if prefix == "priority" || prefix == "status" || prefix == "type" || prefix == "beads-id" {
 			continue
 		}
 		filtered = append(filtered, label)
 	}
 	return filtered
+}
+
+// ExtractBeadsID extracts the beads issue ID from GitLab labels.
+// Looks for labels like "beads-id::bd-12345" and returns "bd-12345".
+// Returns empty string if no beads-id label found.
+func ExtractBeadsID(labels []string) string {
+	for _, label := range labels {
+		prefix, value := parseLabelPrefix(label)
+		if prefix == "beads-id" {
+			return value
+		}
+	}
+	return ""
 }
