@@ -32,9 +32,10 @@ var gitlabCmd = &cobra.Command{
 	Long: `Commands for syncing issues between beads and GitLab.
 
 Configuration can be set via 'bd config' or environment variables:
-  gitlab.url / GITLAB_URL         - GitLab instance URL
-  gitlab.token / GITLAB_TOKEN     - Personal access token
-  gitlab.project_id / GITLAB_PROJECT_ID - Project ID or path`,
+  gitlab.url / GITLAB_URL               - GitLab instance URL
+  gitlab.token / GITLAB_TOKEN           - Personal access token
+  gitlab.project_id / GITLAB_PROJECT_ID - Project ID or path
+  gitlab.group_id / GITLAB_GROUP_ID     - Group ID (required for --epics)`,
 }
 
 // gitlabSyncCmd synchronizes issues between beads and GitLab.
@@ -68,12 +69,14 @@ var gitlabProjectsCmd = &cobra.Command{
 }
 
 var (
-	gitlabSyncDryRun   bool
-	gitlabSyncPullOnly bool
-	gitlabSyncPushOnly bool
-	gitlabPreferLocal  bool
-	gitlabPreferGitLab bool
-	gitlabPreferNewer  bool
+	gitlabSyncDryRun      bool
+	gitlabSyncPullOnly    bool
+	gitlabSyncPushOnly    bool
+	gitlabPreferLocal     bool
+	gitlabPreferGitLab    bool
+	gitlabPreferNewer     bool
+	gitlabSyncMilestones  bool
+	gitlabSyncEpics       bool
 )
 
 // issueIDCounter is used to generate unique issue IDs.
@@ -171,6 +174,10 @@ func init() {
 	gitlabSyncCmd.Flags().BoolVar(&gitlabPreferGitLab, "prefer-gitlab", false, "On conflict, use GitLab version")
 	gitlabSyncCmd.Flags().BoolVar(&gitlabPreferNewer, "prefer-newer", false, "On conflict, use most recent version (default)")
 
+	// Milestone and epic sync flags
+	gitlabSyncCmd.Flags().BoolVar(&gitlabSyncMilestones, "milestones", false, "Sync GitLab milestones as beads epics")
+	gitlabSyncCmd.Flags().BoolVar(&gitlabSyncEpics, "epics", false, "Sync GitLab group epics as beads epics (requires gitlab.group_id)")
+
 	// Register gitlab command with root
 	rootCmd.AddCommand(gitlabCmd)
 }
@@ -226,6 +233,8 @@ func gitlabConfigToEnvVar(key string) string {
 		return "GITLAB_TOKEN"
 	case "gitlab.project_id":
 		return "GITLAB_PROJECT_ID"
+	case "gitlab.group_id":
+		return "GITLAB_GROUP_ID"
 	default:
 		return ""
 	}
@@ -411,6 +420,40 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		}
 		if result.Stats.Conflicts > 0 {
 			_, _ = fmt.Fprintf(out, "→ Resolved %d conflicts\n", result.Stats.Conflicts)
+		}
+	}
+
+	// Milestone sync
+	if gitlabSyncMilestones {
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out, "Syncing milestones...")
+		msOpts := milestoneSyncOptions{
+			DryRun:   gitlabSyncDryRun,
+			PullOnly: gitlabSyncPullOnly,
+			PushOnly: gitlabSyncPushOnly,
+		}
+		if err := syncGitLabMilestones(ctx, getGitLabClient(config), store, actor, out, msOpts); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "Milestone sync error: %v\n", err)
+		}
+	}
+
+	// Epic sync
+	if gitlabSyncEpics {
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out, "Syncing epics...")
+		groupID := getGitLabConfigValue(ctx, "gitlab.group_id")
+		if groupID == "" {
+			groupID = os.Getenv("GITLAB_GROUP_ID")
+		}
+
+		epOpts := epicSyncOptions{
+			DryRun:   gitlabSyncDryRun,
+			PullOnly: gitlabSyncPullOnly,
+			PushOnly: gitlabSyncPushOnly,
+			GroupID:  groupID,
+		}
+		if err := syncGitLabEpics(ctx, getGitLabClient(config), store, actor, out, epOpts); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "Epic sync error: %v\n", err)
 		}
 	}
 
