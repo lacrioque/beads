@@ -20,8 +20,8 @@ func init() {
 	})
 }
 
-// issueIIDPattern matches GitLab issue URLs: .../issues/42
-var issueIIDPattern = regexp.MustCompile(`/issues/(\d+)`)
+// IssueIIDPattern matches GitLab issue URLs: .../issues/42
+var IssueIIDPattern = regexp.MustCompile(`/issues/(\d+)`)
 
 // Tracker implements tracker.IssueTracker for GitLab.
 type Tracker struct {
@@ -154,16 +154,16 @@ func (t *Tracker) IsExternalRef(ref string) bool {
 	// Match against the configured GitLab base URL. This supports self-hosted
 	// instances that don't have "gitlab" in the hostname (e.g., git.company.com).
 	if t.client != nil && t.client.BaseURL != "" {
-		if strings.HasPrefix(ref, t.client.BaseURL) && issueIIDPattern.MatchString(ref) {
+		if strings.HasPrefix(ref, t.client.BaseURL) && IssueIIDPattern.MatchString(ref) {
 			return true
 		}
 	}
 	// Fall back to URL containing "gitlab" for backwards compatibility.
-	return strings.Contains(ref, "gitlab") && issueIIDPattern.MatchString(ref)
+	return strings.Contains(ref, "gitlab") && IssueIIDPattern.MatchString(ref)
 }
 
 func (t *Tracker) ExtractIdentifier(ref string) string {
-	matches := issueIIDPattern.FindStringSubmatch(ref)
+	matches := IssueIIDPattern.FindStringSubmatch(ref)
 	if len(matches) < 2 {
 		return ""
 	}

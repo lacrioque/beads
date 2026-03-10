@@ -448,6 +448,13 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Dependency sync (issue links ↔ beads dependencies)
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "Syncing dependencies...")
+	if err := syncGitLabDependencies(ctx, glClient, store, actor, out, gitlabSyncDryRun, gitlabSyncPullOnly, gitlabSyncPushOnly); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Dependency sync error: %v\n", err)
+	}
+
 	// Milestone sync
 	if gitlabSyncMilestones {
 		_, _ = fmt.Fprintln(out)
