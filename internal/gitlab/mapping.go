@@ -202,9 +202,12 @@ func BeadsIssueToGitLabFields(issue *types.Issue, config *MappingConfig) map[str
 		fields["weight"] = *issue.EstimatedMinutes / 60
 	}
 
-	// Set state_event for closed issues
+	// Set state_event to sync open/closed state with GitLab
 	if issue.Status == types.StatusClosed {
 		fields["state_event"] = "close"
+	} else {
+		// Reopen if not closed — GitLab ignores "reopen" if already open
+		fields["state_event"] = "reopen"
 	}
 
 	return fields

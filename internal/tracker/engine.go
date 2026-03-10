@@ -538,15 +538,22 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			if !forceIDs[issue.ID] {
 				extIssue, err := e.Tracker.FetchIssue(ctx, extID)
 				if err == nil && extIssue != nil {
-					// ContentEqual hook: content-hash dedup to skip unnecessary API calls
-					if e.PushHooks != nil && e.PushHooks.ContentEqual != nil {
-						if e.PushHooks.ContentEqual(issue, extIssue) {
-							stats.Skipped++
+					// Always push if the status changed (e.g., locally closed
+					// but still open on the external tracker). Timestamp
+					// comparison alone misses status-only changes.
+					statusChanged := e.statusDiverged(issue, extIssue)
+
+					if !statusChanged {
+						// ContentEqual hook: content-hash dedup to skip unnecessary API calls
+						if e.PushHooks != nil && e.PushHooks.ContentEqual != nil {
+							if e.PushHooks.ContentEqual(issue, extIssue) {
+								stats.Skipped++
+								continue
+							}
+						} else if !extIssue.UpdatedAt.Before(issue.UpdatedAt) {
+							stats.Skipped++ // Default: external is same or newer
 							continue
 						}
-					} else if !extIssue.UpdatedAt.Before(issue.UpdatedAt) {
-						stats.Skipped++ // Default: external is same or newer
-						continue
 					}
 				}
 			}
@@ -684,6 +691,16 @@ func (e *Engine) shouldPushIssue(issue *types.Issue, opts SyncOptions) bool {
 	}
 
 	return true
+}
+
+// statusDiverged returns true if the local issue's status doesn't match the
+// external tracker's state. This catches status-only changes (e.g., locally
+// closed but still open on the tracker) that timestamp comparison misses.
+func (e *Engine) statusDiverged(local *types.Issue, ext *TrackerIssue) bool {
+	localClosed := local.Status == types.StatusClosed
+	extState := e.Tracker.FieldMapper().StatusToBeads(ext.State)
+	extClosed := extState == types.StatusClosed
+	return localClosed != extClosed
 }
 
 // ResolveState maps a beads status to a tracker state ID using the push state cache.
