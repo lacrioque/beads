@@ -147,6 +147,18 @@ func (t *Tracker) FieldMapper() tracker.FieldMapper {
 }
 
 func (t *Tracker) IsExternalRef(ref string) bool {
+	// Match the "gitlab:<id>" fallback format from BuildExternalRef.
+	if strings.HasPrefix(ref, "gitlab:") {
+		return true
+	}
+	// Match against the configured GitLab base URL. This supports self-hosted
+	// instances that don't have "gitlab" in the hostname (e.g., git.company.com).
+	if t.client != nil && t.client.BaseURL != "" {
+		if strings.HasPrefix(ref, t.client.BaseURL) && issueIIDPattern.MatchString(ref) {
+			return true
+		}
+	}
+	// Fall back to URL containing "gitlab" for backwards compatibility.
 	return strings.Contains(ref, "gitlab") && issueIIDPattern.MatchString(ref)
 }
 

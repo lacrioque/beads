@@ -370,6 +370,12 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 			updates["priority"] = conv.Issue.Priority
 			updates["status"] = string(conv.Issue.Status)
 
+			// Ensure external_ref is always set — defensive against lost refs
+			// that would cause duplicate creation on next pull.
+			if derefStr(existing.ExternalRef) == "" {
+				updates["external_ref"] = ref
+			}
+
 			// Preserve metadata from tracker
 			if extIssue.Metadata != nil {
 				if raw, err := json.Marshal(extIssue.Metadata); err == nil {

@@ -10,8 +10,15 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
+
+// joinLabels converts a label slice to the comma-separated string format
+// that GitLab's REST API expects for the "labels" parameter.
+func joinLabels(labels []string) string {
+	return strings.Join(labels, ",")
+}
 
 // NewClient creates a new GitLab client with the given token, base URL, and project ID.
 func NewClient(token, baseURL, projectID string) *Client {
@@ -253,7 +260,8 @@ func (c *Client) CreateIssue(ctx context.Context, title, description string, lab
 		"description": description,
 	}
 	if len(labels) > 0 {
-		body["labels"] = labels
+		// GitLab REST API expects labels as a comma-separated string, not a JSON array.
+		body["labels"] = joinLabels(labels)
 	}
 
 	urlStr := c.buildURL("/projects/"+c.projectPath()+"/issues", nil)
@@ -272,6 +280,12 @@ func (c *Client) CreateIssue(ctx context.Context, title, description string, lab
 
 // UpdateIssue updates an existing issue in GitLab.
 func (c *Client) UpdateIssue(ctx context.Context, iid int, updates map[string]interface{}) (*Issue, error) {
+	// GitLab REST API expects labels as a comma-separated string, not a JSON array.
+	if labels, ok := updates["labels"]; ok {
+		if sl, ok := labels.([]string); ok {
+			updates["labels"] = joinLabels(sl)
+		}
+	}
 	urlStr := c.buildURL("/projects/"+c.projectPath()+"/issues/"+strconv.Itoa(iid), nil)
 	respBody, _, err := c.doRequest(ctx, http.MethodPut, urlStr, updates)
 	if err != nil {
