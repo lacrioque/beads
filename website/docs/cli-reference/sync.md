@@ -6,36 +6,80 @@ sidebar_position: 6
 
 # Sync & Export Commands
 
-Commands for synchronizing with Dolt.
+Commands for synchronizing beads data with backends.
 
 ## bd sync
 
-Full sync cycle: Dolt commit and push.
+Configurable dispatch command that routes to the appropriate sync backend.
 
 ```bash
 bd sync [flags]
 ```
 
 **What it does:**
-1. Dolt commit (snapshot current database state)
-2. Dolt push to remote
+
+`bd sync` reads the `sync.target` config key and dispatches to the matching backend. The default target is `dolt` (pull + push).
 
 **Flags:**
 ```bash
---json     JSON output
---dry-run  Preview without changes
+--dry-run      Preview without changes
+--pull-only    Only pull from remote
+--push-only    Only push to remote
+--flush-only   Legacy no-op (kept for pre-commit hook compatibility)
 ```
 
 **Examples:**
 ```bash
-bd sync
-bd sync --json
+bd sync                # dispatch to configured target (default: dolt)
+bd sync --dry-run      # preview what would happen
+bd sync --pull-only    # only pull, skip push
+```
+
+### Configuring the sync target
+
+Set `sync.target` in your project config to choose which backend `bd sync` dispatches to:
+
+```bash
+bd config set sync.target dolt                    # Dolt pull + push (default)
+bd config set sync.target gitlab                  # GitLab issue sync
+bd config set sync.target gitlab+milestones       # GitLab + milestone sync
+bd config set sync.target gitlab+epics            # GitLab + epic sync
+bd config set sync.target gitlab+milestones+epics # GitLab + both
+bd config set sync.target federation              # Federation peer sync
+bd config set sync.target repo                    # Multi-repo sync
+bd config set sync.target backup                  # Dolt backup sync
+```
+
+The `+` separator enables additional options. Currently, options are only supported for the `gitlab` target (`milestones`, `epics`).
+
+### Sync targets
+
+| Target | What it does |
+|--------|-------------|
+| `dolt` | Pull from Dolt remote, then push (default) |
+| `gitlab` | Bidirectional issue sync with GitLab |
+| `gitlab+milestones` | Issue sync + sync GitLab milestones as epics |
+| `gitlab+epics` | Issue sync + sync GitLab group epics as epics |
+| `gitlab+milestones+epics` | Issue sync + milestones + group epics |
+| `federation` | Sync with all configured federation peers |
+| `repo` | Pull issues from configured additional repositories |
+| `backup` | Push database to configured Dolt backup |
+
+### Backend-specific flags
+
+The universal flags (`--dry-run`, `--pull-only`, `--push-only`) are forwarded to all backends that support them. For backend-specific flags (e.g., `--prefer-local` for GitLab, `--peer` for federation), invoke the backend command directly:
+
+```bash
+bd gitlab sync --prefer-local
+bd federation sync --peer myteam
+bd backup sync
 ```
 
 **When to use:**
 - End of work session
 - Before switching branches
 - After significant changes
+- Any time you want a one-command sync regardless of backend
 
 ## bd export
 

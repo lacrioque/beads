@@ -114,6 +114,43 @@ retention_days = 30           # Keep deletion records for N days
 prune_on_sync = true          # Auto-prune old records
 ```
 
+### Sync
+
+Configure the `bd sync` dispatch target. This determines which backend `bd sync` routes to.
+
+```yaml
+# .beads/config.yaml
+sync:
+  target: "dolt"              # dolt | gitlab | gitlab+milestones | gitlab+epics | gitlab+milestones+epics | federation | repo | backup
+```
+
+```bash
+bd config set sync.target gitlab+milestones
+```
+
+See [Sync & Export](/docs/cli-reference/sync) for full details on each target.
+
+### Integration Settings (GitLab, Jira, Linear)
+
+Integration settings follow a three-tier priority:
+
+1. **Database** (Dolt store) — set via `bd config set`
+2. **Environment variables** — e.g., `GITLAB_TOKEN`
+3. **config.yaml** (viper) — set in `.beads/config.yaml`
+
+This means you can configure integrations in `config.yaml` without needing environment variables:
+
+```yaml
+# .beads/config.yaml
+gitlab:
+  url: "https://gitlab.example.com"
+  token: "glpat-xxxxxxxxxxxx"
+  project_id: "81"
+  group_id: "12"               # Required for --epics
+```
+
+Database and env var values take precedence, so `config.yaml` acts as a fallback default.
+
 ## Environment Variables
 
 | Variable | Description |
@@ -121,6 +158,10 @@ prune_on_sync = true          # Auto-prune old records
 | `BEADS_DB` | Database path |
 | `BEADS_LOG_LEVEL` | Log level |
 | `BEADS_CONFIG` | Config file path |
+| `GITLAB_URL` | GitLab instance URL |
+| `GITLAB_TOKEN` | GitLab personal access token |
+| `GITLAB_PROJECT_ID` | GitLab project ID or path |
+| `GITLAB_GROUP_ID` | GitLab group ID (for epic sync) |
 
 ## Per-Command Override
 
