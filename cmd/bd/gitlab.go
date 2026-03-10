@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/gitlab"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/tracker"
@@ -219,6 +220,11 @@ func getGitLabConfigValue(ctx context.Context, key string) string {
 		if value := os.Getenv(envKey); value != "" {
 			return value
 		}
+	}
+
+	// Fall back to config.yaml (viper)
+	if value := config.GetString(key); value != "" {
+		return value
 	}
 
 	return ""

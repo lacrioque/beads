@@ -353,7 +353,7 @@ var rootCmd = &cobra.Command{
 			"quickstart",
 			"resolve-conflicts",
 			"setup",
-			"sync", // deprecated no-op, prints message only
+			// "sync" removed — bd sync now needs database access for dispatch
 			"version",
 			"zsh",
 		}
@@ -380,8 +380,20 @@ var rootCmd = &cobra.Command{
 				return
 			}
 		}
-		if slices.Contains(noDbCommands, cmdName) {
+		// Only skip DB init for top-level commands (parent is root).
+		// Without this guard, "bd gitlab sync" matches "sync" in noDbCommands
+		// and skips store initialization, breaking gitlab config reads.
+		isTopLevel := cmd.Parent() == nil || cmd.Parent().Parent() == nil
+		if slices.Contains(noDbCommands, cmdName) && isTopLevel {
 			return
+		}
+
+		// "bd sync --flush-only" is a legacy no-op called by pre-commit hooks.
+		// Skip DB init since it doesn't need the store.
+		if cmdName == "sync" && isTopLevel {
+			if flushOnly, _ := cmd.Flags().GetBool("flush-only"); flushOnly {
+				return
+			}
 		}
 
 		// Skip for root command with no subcommand (just shows help)

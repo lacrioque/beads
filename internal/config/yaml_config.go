@@ -35,6 +35,7 @@ var YamlOnlyKeys = map[string]bool{
 	"no-git-ops":      true, // Disable git ops in bd prime session close protocol (GH#593)
 
 	// Sync settings
+	"sync.target":                              true,
 	"sync.git-remote":                          true,
 	"sync.require_confirmation_on_mass_delete": true,
 
@@ -295,6 +296,24 @@ func validateYamlConfigValue(key, value string) error {
 		if value != "0" {
 			if _, err := time.ParseDuration(value); err != nil {
 				return fmt.Errorf("dolt.idle-timeout must be a duration (e.g. \"30m\", \"1h\") or \"0\" to disable, got %q", value)
+			}
+		}
+	case "sync.target":
+		// Validate sync target: base target optionally with +options
+		validTargets := map[string]bool{
+			"dolt": true, "gitlab": true, "federation": true,
+			"repo": true, "backup": true,
+		}
+		validOptions := map[string]bool{
+			"milestones": true, "epics": true,
+		}
+		parts := strings.Split(value, "+")
+		if !validTargets[parts[0]] {
+			return fmt.Errorf("sync.target base must be one of: dolt, gitlab, federation, repo, backup; got %q", parts[0])
+		}
+		for _, opt := range parts[1:] {
+			if !validOptions[opt] {
+				return fmt.Errorf("sync.target option %q is not valid; allowed options: milestones, epics", opt)
 			}
 		}
 	}

@@ -32,6 +32,7 @@ Common namespaces:
   - github.*          GitHub integration settings
   - custom.*          Custom integration settings
   - status.*          Issue status configuration
+  - sync.*            Sync dispatch settings (sync.target = dolt|gitlab|gitlab+milestones|...)
   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
 
 Custom Status States:

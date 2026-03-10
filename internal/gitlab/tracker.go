@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
@@ -164,7 +165,7 @@ func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
 	return fmt.Sprintf("gitlab:%s", issue.Identifier)
 }
 
-// getConfig reads a config value from storage, falling back to env var.
+// getConfig reads a config value from storage, falling back to env var, then config.yaml.
 func (t *Tracker) getConfig(ctx context.Context, key, envVar string) (string, error) {
 	val, err := t.store.GetConfig(ctx, key)
 	if err == nil && val != "" {
@@ -174,6 +175,10 @@ func (t *Tracker) getConfig(ctx context.Context, key, envVar string) (string, er
 		if envVal := os.Getenv(envVar); envVal != "" {
 			return envVal, nil
 		}
+	}
+	// Fall back to config.yaml (viper)
+	if cfgVal := config.GetString(key); cfgVal != "" {
+		return cfgVal, nil
 	}
 	return "", nil
 }
