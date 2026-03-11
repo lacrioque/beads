@@ -1,13 +1,41 @@
 package gitlab
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// newTestServer creates a test HTTP server with a handler that dispatches
+// based on method and path. The handler func receives the parsed JSON body
+// and returns a status code and response object to marshal.
+func newTestServer(t *testing.T, handler func(method, path string, body map[string]interface{}) (int, interface{})) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if r.Body != nil {
+			data, _ := io.ReadAll(r.Body)
+			if len(data) > 0 {
+				_ = json.Unmarshal(data, &body)
+			}
+		}
+		status, resp := handler(r.Method, r.URL.Path, body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if resp != nil {
+			_ = json.NewEncoder(w).Encode(resp)
+		}
+	}))
+}
 
 func TestRegistered(t *testing.T) {
 	factory := tracker.Get("gitlab")
@@ -99,6 +127,125 @@ func TestFieldMapperPriority(t *testing.T) {
 	}
 	if got := m.PriorityToBeads("low"); got != 3 {
 		t.Errorf("PriorityToBeads(low) = %d, want 3", got)
+	}
+}
+
+func TestCreateIssueClosesIfLocalClosed(t *testing.T) {
+	// Verify that CreateIssue calls UpdateIssue with state_event:"close"
+	// when the local issue is closed. We test this via a mock HTTP server.
+	now := time.Now()
+	createCalled := false
+	updateCalled := false
+	var updateBody map[string]interface{}
+
+	ts := newTestServer(t, func(method, path string, body map[string]interface{}) (int, interface{}) {
+		if method == "POST" && strings.Contains(path, "/issues") && !strings.Contains(path, "/links") {
+			createCalled = true
+			return 201, &Issue{
+				ID:        1,
+				IID:       42,
+				Title:     "Test",
+				State:     "opened",
+				WebURL:    "https://gitlab.com/test/-/issues/42",
+				CreatedAt: &now,
+				UpdatedAt: &now,
+			}
+		}
+		if method == "PUT" && strings.Contains(path, "/issues/42") {
+			updateCalled = true
+			updateBody = body
+			closed := Issue{
+				ID:        1,
+				IID:       42,
+				Title:     "Test",
+				State:     "closed",
+				WebURL:    "https://gitlab.com/test/-/issues/42",
+				CreatedAt: &now,
+				UpdatedAt: &now,
+				ClosedAt:  &now,
+			}
+			return 200, &closed
+		}
+		return 404, map[string]string{"error": "not found"}
+	})
+	defer ts.Close()
+
+	tr := &Tracker{
+		client: NewClient("test-token", ts.URL, "123"),
+		config: DefaultMappingConfig(),
+	}
+
+	issue := &types.Issue{
+		ID:        "bd-closed1",
+		Title:     "Test",
+		Status:    types.StatusClosed,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+
+	result, err := tr.CreateIssue(context.Background(), issue)
+	if err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+	if !createCalled {
+		t.Error("expected POST /issues to be called")
+	}
+	if !updateCalled {
+		t.Error("expected PUT /issues/42 to be called for state_event:close")
+	}
+	if updateBody != nil {
+		if se, ok := updateBody["state_event"]; !ok || se != "close" {
+			t.Errorf("state_event = %v, want %q", se, "close")
+		}
+	}
+	if result == nil {
+		t.Fatal("CreateIssue returned nil")
+	}
+}
+
+func TestCreateIssueDoesNotCloseIfOpen(t *testing.T) {
+	now := time.Now()
+	updateCalled := false
+
+	ts := newTestServer(t, func(method, path string, body map[string]interface{}) (int, interface{}) {
+		if method == "POST" && strings.Contains(path, "/issues") {
+			return 201, &Issue{
+				ID:        1,
+				IID:       42,
+				Title:     "Test",
+				State:     "opened",
+				WebURL:    "https://gitlab.com/test/-/issues/42",
+				CreatedAt: &now,
+				UpdatedAt: &now,
+			}
+		}
+		if method == "PUT" {
+			updateCalled = true
+			return 200, &Issue{}
+		}
+		return 404, map[string]string{"error": "not found"}
+	})
+	defer ts.Close()
+
+	tr := &Tracker{
+		client: NewClient("test-token", ts.URL, "123"),
+		config: DefaultMappingConfig(),
+	}
+
+	issue := &types.Issue{
+		ID:        "bd-open1",
+		Title:     "Test",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+
+	_, err := tr.CreateIssue(context.Background(), issue)
+	if err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+	if updateCalled {
+		t.Error("UpdateIssue should NOT be called for open issues")
 	}
 }
 

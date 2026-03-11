@@ -170,6 +170,32 @@ func (m *mockMapper) IssueToBeads(ti *TrackerIssue) *IssueConversion {
 	}
 }
 
+// statusAwareMockMapper is like mockMapper but maps State to Status.
+type statusAwareMockMapper struct{ mockMapper }
+
+func (m *statusAwareMockMapper) StatusToBeads(s interface{}) types.Status {
+	if str, ok := s.(string); ok && str == "closed" {
+		return types.StatusClosed
+	}
+	return types.StatusOpen
+}
+
+func (m *statusAwareMockMapper) IssueToBeads(ti *TrackerIssue) *IssueConversion {
+	status := types.StatusOpen
+	if ti.State == "closed" {
+		status = types.StatusClosed
+	}
+	return &IssueConversion{
+		Issue: &types.Issue{
+			Title:       ti.Title,
+			Description: ti.Description,
+			Priority:    2,
+			Status:      status,
+			IssueType:   types.TypeTask,
+		},
+	}
+}
+
 func TestEnginePullOnly(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -750,3 +776,160 @@ func TestEnginePushWithStateCache(t *testing.T) {
 		t.Errorf("ResolveState(Closed) = (%q, %v), want (%q, true)", stateID, ok, "state-closed-id")
 	}
 }
+
+func TestEnginePullPreservesLocalClose(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Create a locally-closed issue with an external ref
+	issue := &types.Issue{
+		ID:          "bd-closed1",
+		Title:       "Locally closed",
+		Status:      types.StatusClosed,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: strPtr("https://test.test/EXT-1"),
+		ClosedAt:    timePtr(time.Now().UTC().Add(-2 * time.Hour)),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	// External tracker returns the issue as "opened" (not yet closed remotely)
+	mt := newMockTracker("test")
+	mt.fieldMapper = &statusAwareMockMapper{}
+	mt.issues = []TrackerIssue{
+		{
+			ID:         "EXT-1",
+			Identifier: "EXT-1",
+			Title:      "Locally closed (remote title)",
+			State:      "opened",
+			UpdatedAt:  time.Now().UTC(),
+		},
+	}
+
+	engine := NewEngine(mt, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Updated != 1 {
+		t.Errorf("Stats.Updated = %d, want 1", result.Stats.Updated)
+	}
+
+	// Verify: local issue should still be closed (status not overwritten)
+	updated, _ := store.GetIssue(ctx, "bd-closed1")
+	if updated.Status != types.StatusClosed {
+		t.Errorf("local status = %q, want %q (pull should not reopen locally-closed issue)", updated.Status, types.StatusClosed)
+	}
+	// But title should be updated from remote
+	if updated.Title != "Locally closed (remote title)" {
+		t.Errorf("title = %q, want %q", updated.Title, "Locally closed (remote title)")
+	}
+}
+
+func TestEnginePullPropagatesRemoteClose(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Create a locally-open issue with an external ref
+	issue := &types.Issue{
+		ID:          "bd-open1",
+		Title:       "Open locally",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: strPtr("https://test.test/EXT-1"),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	// External tracker returns the issue as closed
+	mt := newMockTracker("test")
+	mt.fieldMapper = &statusAwareMockMapper{}
+	mt.issues = []TrackerIssue{
+		{
+			ID:         "EXT-1",
+			Identifier: "EXT-1",
+			Title:      "Closed remotely",
+			State:      "closed",
+			UpdatedAt:  time.Now().UTC(),
+		},
+	}
+
+	engine := NewEngine(mt, store, "test-actor")
+
+	_, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+
+	// Verify: remote close should propagate to local
+	updated, _ := store.GetIssue(ctx, "bd-open1")
+	if updated.Status != types.StatusClosed {
+		t.Errorf("local status = %q, want %q (remote close should propagate)", updated.Status, types.StatusClosed)
+	}
+}
+
+func TestEnginePushFindExistingPushesState(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Create a local closed issue with no external ref
+	issue := &types.Issue{
+		ID:        "bd-findexist1",
+		Title:     "Find existing",
+		Status:    types.StatusClosed,
+		IssueType: types.TypeTask,
+		Priority:  2,
+		ClosedAt:  timePtr(time.Now().UTC()),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	mt := newMockTracker("test")
+	// The existing remote issue to be "found"
+	existingRemote := &TrackerIssue{
+		ID:         "EXT-FOUND",
+		Identifier: "EXT-FOUND",
+		URL:        "https://test.test/EXT-FOUND",
+		Title:      "Find existing",
+	}
+
+	engine := NewEngine(mt, store, "test-actor")
+	engine.PushHooks = &PushHooks{
+		FindExisting: func(ctx context.Context, issue *types.Issue) (*TrackerIssue, error) {
+			if issue.ID == "bd-findexist1" {
+				return existingRemote, nil
+			}
+			return nil, nil
+		},
+	}
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Updated != 1 {
+		t.Errorf("Stats.Updated = %d, want 1", result.Stats.Updated)
+	}
+
+	// Verify: UpdateIssue was called on the found remote issue to push state
+	if _, ok := mt.updated["EXT-FOUND"]; !ok {
+		t.Error("expected UpdateIssue to be called for found existing remote issue, but it wasn't")
+	}
+
+	// Verify: external_ref was stored locally
+	local, _ := store.GetIssue(ctx, "bd-findexist1")
+	if derefStr(local.ExternalRef) != "https://test.test/EXT-FOUND" {
+		t.Errorf("external_ref = %q, want %q", derefStr(local.ExternalRef), "https://test.test/EXT-FOUND")
+	}
+}
+
+func timePtr(t time.Time) *time.Time { return &t }

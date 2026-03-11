@@ -368,7 +368,15 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 			updates["title"] = conv.Issue.Title
 			updates["description"] = conv.Issue.Description
 			updates["priority"] = conv.Issue.Priority
-			updates["status"] = string(conv.Issue.Status)
+
+			// Protect local closes from being overwritten by remote open status.
+			// If the local issue is closed and the remote is not, the close hasn't
+			// been pushed yet — don't revert it. Remote closes still propagate.
+			if existing.Status == types.StatusClosed && conv.Issue.Status != types.StatusClosed {
+				// Keep local closed status; don't add to updates
+			} else {
+				updates["status"] = string(conv.Issue.Status)
+			}
 
 			// Ensure external_ref is always set — defensive against lost refs
 			// that would cause duplicate creation on next pull.
@@ -505,6 +513,13 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 					updates := map[string]interface{}{"external_ref": ref}
 					if err := e.Store.UpdateIssue(ctx, issue.ID, updates, e.Actor); err != nil {
 						e.warn("Failed to update external_ref for %s: %v", issue.ID, err)
+					}
+					// Push current local state to the existing remote issue
+					extID := e.Tracker.ExtractIdentifier(ref)
+					if extID != "" {
+						if _, err := e.Tracker.UpdateIssue(ctx, extID, pushIssue); err != nil {
+							e.warn("Failed to push state to existing %s: %v", extID, err)
+						}
 					}
 					stats.Updated++
 					continue

@@ -122,6 +122,14 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 		return nil, err
 	}
 
+	// GitLab's POST /issues API doesn't support state_event, so close
+	// immediately after creation if the local issue is closed.
+	if issue.Status == types.StatusClosed {
+		if closed, err := t.client.UpdateIssue(ctx, created.IID, map[string]interface{}{"state_event": "close"}); err == nil {
+			created = closed
+		}
+	}
+
 	ti := gitlabToTrackerIssue(created)
 	return &ti, nil
 }
